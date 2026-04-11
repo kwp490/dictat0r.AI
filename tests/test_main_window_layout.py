@@ -274,7 +274,7 @@ class TestDiagnosticsToggleLive(unittest.TestCase):
 
     def _make_window(self):
         """Create a MainWindow with mocked engine for testing."""
-        from unittest.mock import MagicMock, PropertyMock
+        from unittest.mock import MagicMock, PropertyMock, patch
         from dictator.config import Settings
         import tempfile
 
@@ -285,8 +285,18 @@ class TestDiagnosticsToggleLive(unittest.TestCase):
         engine.name = "mock"
         type(engine).is_loaded = PropertyMock(return_value=False)
 
-        from dictator.main_window import MainWindow
-        win = MainWindow(settings, engine=engine)
+        # Use a temp dir for presets so tests don't need C:\Program Files access
+        self._tmp = tempfile.mkdtemp()
+        tmp_presets = Path(self._tmp) / "presets"
+
+        import dictator.main_window as _mw
+        orig = _mw.DEFAULT_PRESETS_DIR
+        _mw.DEFAULT_PRESETS_DIR = tmp_presets
+        try:
+            from dictator.main_window import MainWindow
+            win = MainWindow(settings, engine=engine)
+        finally:
+            _mw.DEFAULT_PRESETS_DIR = orig
         return win
 
     def test_diagnostics_hidden_by_default(self):
@@ -375,7 +385,7 @@ class TestDiagnosticsToggleLive(unittest.TestCase):
         """Professional Mode checkbox reflects settings.professional_mode."""
         from unittest.mock import MagicMock, PropertyMock, patch
         from dictator.config import Settings
-        from dictator.main_window import MainWindow
+        import tempfile
 
         settings = Settings()
         settings.professional_mode = True
@@ -385,11 +395,19 @@ class TestDiagnosticsToggleLive(unittest.TestCase):
         engine.name = "mock"
         type(engine).is_loaded = PropertyMock(return_value=False)
 
-        win = MainWindow(settings, engine=engine)
+        tmp = tempfile.mkdtemp()
+        import dictator.main_window as _mw
+        orig = _mw.DEFAULT_PRESETS_DIR
+        _mw.DEFAULT_PRESETS_DIR = Path(tmp) / "presets"
         try:
-            self.assertTrue(win._chk_professional.isChecked())
+            from dictator.main_window import MainWindow
+            win = MainWindow(settings, engine=engine)
+            try:
+                self.assertTrue(win._chk_professional.isChecked())
+            finally:
+                win.close()
         finally:
-            win.close()
+            _mw.DEFAULT_PRESETS_DIR = orig
 
     def test_toggle_on_without_api_key_reverts(self):
         """Enabling Professional Mode without an API key must revert the checkbox."""
