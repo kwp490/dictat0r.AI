@@ -5,10 +5,10 @@
 .DESCRIPTION
     Two-step build:
       1. pyinstaller dictator.spec  → dist/dictator/
-      2. iscc installer/dictator-AI-Setup.iss → installer/Output/dictator-AI-Setup-<version>.exe
+      2. iscc installer/dictator-setup.iss → installer/Output/dictator-AI-Setup-<version>.exe
 
     Run from the repository root. Requires:
-      - Python venv with PyInstaller (uv sync --extra Granite --extra dev)
+      - Python venv with PyInstaller (uv sync --extra dev)
       - Inno Setup 6.x with iscc.exe on PATH or at the default install location
 
 .PARAMETER Clean
@@ -53,7 +53,7 @@ function Write-Ok($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Get-SourceHash {
     $hashInput = @()
     # Python source + spec + project config
-    $files = @(Get-ChildItem -Path "dictat0r.AI" -Recurse -Include "*.py" -File) +
+    $files = @(Get-ChildItem -Path "dictator" -Recurse -Include "*.py" -File) +
              @(Get-Item "dictator.spec") +
              @(Get-Item "pyproject.toml")
     foreach ($f in $files | Sort-Object FullName) {
@@ -66,7 +66,7 @@ function Get-SourceHash {
     return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '')
 }
 
-$HashFile = "build\.dictat0r.AI-build-hash"
+$HashFile = "build\.dictator-build-hash"
 
 # ── Pre-flight checks ────────────────────────────────────────────────────────
 Write-Step "Checking prerequisites..."
@@ -173,7 +173,7 @@ if ($InnoOnly) {
 Write-Step "Building installer with Inno Setup..."
 
 Write-Host "  Using: $($iscc)"
-$isccArgs = @("installer\dictator-AI-Setup.iss")
+$isccArgs = @("installer\dictator-setup.iss")
 if ($Fast) {
     $isccArgs = @("/DFastCompress") + $isccArgs
     Write-Host "  Mode: fast compression (dev build)" -ForegroundColor Yellow

@@ -24,10 +24,10 @@
     non-test changes and you want a faster launch cycle.
 
 .EXAMPLE
-    .\Test-dictat0r.AI.ps1                 # interactive menu
-    .\Test-dictat0r.AI.ps1 -Mode Source    # skip menu, run from source
-    .\Test-dictat0r.AI.ps1 -Mode Release   # skip menu, full release cycle
-    .\Test-dictat0r.AI.ps1 -Mode Source -SkipTests   # skip tests, run from source
+    .\Test-Dictator.ps1                 # interactive menu
+    .\Test-Dictator.ps1 -Mode Source    # skip menu, run from source
+    .\Test-Dictator.ps1 -Mode Release   # skip menu, full release cycle
+    .\Test-Dictator.ps1 -Mode Source -SkipTests   # skip tests, run from source
 
 .NOTES
     Run from the repository root.
@@ -114,11 +114,11 @@ if (-not (Test-Path "pyproject.toml")) {
 Write-Ok "pyproject.toml found"
 
 # 1c. Sync dependencies
-Write-Step "Syncing dependencies (uv sync --extra all --extra dev)..."
+Write-Step "Syncing dependencies (uv sync --extra dev)..."
 $prevPref = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
-    uv sync --extra all --extra dev 2>&1 | ForEach-Object { Write-Host "  $_" }
+    uv sync --extra dev 2>&1 | ForEach-Object { Write-Host "  $_" }
 } finally {
     $ErrorActionPreference = $prevPref
 }
@@ -218,9 +218,9 @@ if ($Mode -eq 'Release') {
     # -- Step 3: Silent uninstall ----------------------------------------------
     Write-Step "Checking for existing dictat0r.AI installation..."
 
-    $uninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B7E9F3A1-9C2D-4E5F-8A1B-3D7C6E4F2A9B}_is1'
+    $uninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{A1B2C3D4-5E6F-7A8B-9C0D-E1F2A3B4C5D6}_is1'
     # Also check WOW6432Node for 32-bit Inno Setup entries
-    $uninstallKeyWow = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B7E9F3A1-9C2D-4E5F-8A1B-3D7C6E4F2A9B}_is1'
+    $uninstallKeyWow = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{A1B2C3D4-5E6F-7A8B-9C0D-E1F2A3B4C5D6}_is1'
 
     $uninstallString = $null
     foreach ($key in @($uninstallKey, $uninstallKeyWow)) {
@@ -299,7 +299,7 @@ if ($Mode -eq 'Release') {
 
     # Stop any running instance so the new launch does not hit the
     # "Another instance is already running" single-instance guard.
-    Get-Process -Name 'dictat0r.AI' -ErrorAction SilentlyContinue |
+    Get-Process -Name 'dictator' -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 
@@ -375,7 +375,7 @@ if ($Mode -eq 'Source') {
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        uv run python -m dictat0r.AI 2>&1 | ForEach-Object { Write-Host "  $_" }
+        uv run python -m dictator 2>&1 | ForEach-Object { Write-Host "  $_" }
     } finally {
         $ErrorActionPreference = $prevPref
     }
