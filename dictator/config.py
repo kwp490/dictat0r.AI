@@ -34,6 +34,7 @@ class Settings:
     device: str = "cuda"
     language: str = "en"
     inference_timeout: int = 30
+    keywords: str = ""
 
     # ── Dictation UX ─────────────────────────────────────────────────────────
     auto_copy: bool = True
@@ -65,6 +66,9 @@ class Settings:
         if self.engine not in self._VALID_ENGINES:
             log.warning("Unknown engine '%s'; falling back to 'granite'", self.engine)
             self.engine = "granite"
+        if self.model_path != DEFAULT_MODELS_DIR and not os.path.isdir(self.model_path):
+            log.warning("model_path '%s' does not exist; resetting to default", self.model_path)
+            self.model_path = DEFAULT_MODELS_DIR
         if self.device not in self._VALID_DEVICES:
             log.warning("Unknown device '%s'; falling back to 'cuda'", self.device)
             self.device = "cuda"

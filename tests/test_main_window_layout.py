@@ -218,6 +218,63 @@ class TestLayoutStructure(unittest.TestCase):
         src = self._get_method_source("_update_global_status")
         self.assertIn("Professional", src)
 
+    # ── Engine worker isolation ────────────────────────────────────────
+
+    def test_init_creates_dedicated_engine_pool(self):
+        """MainWindow must create a dedicated single-thread pool for engine work."""
+        src = self._get_method_source("__init__")
+        self.assertIn("self._engine_pool", src)
+        self.assertIn("setMaxThreadCount(1)", src)
+        self.assertIn("setExpiryTimeout(-1)", src)
+
+    def test_load_model_uses_engine_pool(self):
+        """Model load must run on the dedicated engine pool, not the global pool."""
+        src = self._get_method_source("_load_model")
+        self.assertIn("self._engine_pool.start(worker)", src)
+        self.assertNotIn("self._pool.start(worker)", src)
+
+    def test_reload_model_uses_engine_pool(self):
+        """Model reload must run on the dedicated engine pool."""
+        src = self._get_method_source("_on_reload_model")
+        self.assertIn("self._engine_pool.start(worker)", src)
+        self.assertNotIn("self._pool.start(worker)", src)
+
+    def test_validate_uses_engine_pool(self):
+        """Validation must run on the dedicated engine pool."""
+        src = self._get_method_source("_on_validate")
+        self.assertIn("self._engine_pool.start(worker)", src)
+        self.assertNotIn("self._pool.start(worker)", src)
+
+    def test_transcription_uses_engine_pool(self):
+        """Transcription must run on the dedicated engine pool."""
+        src = self._get_method_source("_on_stop_and_transcribe")
+        self.assertIn("self._engine_pool.start(worker)", src)
+        self.assertNotIn("self._pool.start(worker)", src)
+
+    def test_stop_and_transcribe_suspends_mic_stream(self):
+        """The live mic stream must be suspended before transcription starts."""
+        src = self._get_method_source("_on_stop_and_transcribe")
+        self.assertIn("self._suspend_mic_stream_for_processing()", src)
+
+    def test_transcription_result_resumes_mic_stream(self):
+        """Successful transcription must re-open the live mic stream."""
+        src = self._get_method_source("_on_transcription_result")
+        self.assertIn("self._resume_mic_stream_after_processing()", src)
+
+    def test_transcription_error_resumes_mic_stream(self):
+        """Failed transcription must also re-open the live mic stream."""
+        src = self._get_method_source("_on_transcription_error")
+        self.assertIn("self._resume_mic_stream_after_processing()", src)
+
+    def test_suspend_resume_helpers_exist(self):
+        """MainWindow must define explicit mic suspend/resume helpers."""
+        method_names = [
+            n.name for n in ast.walk(self._mw_class)
+            if isinstance(n, ast.FunctionDef)
+        ]
+        self.assertIn("_suspend_mic_stream_for_processing", method_names)
+        self.assertIn("_resume_mic_stream_after_processing", method_names)
+
     # ── Phase 6 (professional mode quick-toggle checkbox) ────────────
 
     def test_chk_professional_in_build_ui(self):

@@ -110,6 +110,33 @@ if (-not $iscc) {
 }
 Write-Ok "Inno Setup found: $($iscc)"
 
+# Verify torch and torchaudio are compatible (mismatched builds cause WinError 127)
+Write-Step "Checking torch / torchaudio compatibility..."
+$torchCheck = uv run python -c "
+import torch, torchaudio, sys
+tv = torch.__version__; tav = torchaudio.__version__
+t_base = tv.split('+')[0]; ta_base = tav.split('+')[0]
+t_tag = tv.partition('+')[2]; ta_tag = tav.partition('+')[2]
+ok = True
+if t_base.rsplit('.', 1)[0] != ta_base.rsplit('.', 1)[0]:
+    print(f'FAIL: torch {tv} and torchaudio {tav} have mismatched major versions')
+    ok = False
+if t_tag != ta_tag:
+    print(f'FAIL: torch build +{t_tag} != torchaudio build +{ta_tag} (CUDA/CPU mismatch)')
+    ok = False
+if ok:
+    print(f'OK: torch={tv}  torchaudio={tav}')
+sys.exit(0 if ok else 1)
+" 2>&1
+$torchCheck | ForEach-Object { Write-Host "  $_" }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  ERROR: torch/torchaudio mismatch will cause DLL load failures at runtime." -ForegroundColor Red
+    Write-Host "  Fix: ensure both use the same index in pyproject.toml [tool.uv.sources], then run 'uv sync'." -ForegroundColor Yellow
+    Pop-Location
+    exit 1
+}
+Write-Ok "torch/torchaudio compatible"
+
 # ── Step 1: PyInstaller ──────────────────────────────────────────────────────
 if ($InnoOnly) {
     Write-Step "Skipping PyInstaller (-InnoOnly flag set)"

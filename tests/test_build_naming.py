@@ -202,5 +202,123 @@ class TestCrossFileVersionConsistency(unittest.TestCase):
         )
 
 
+class TestTorchTorchaudioCompatibility(unittest.TestCase):
+    """torch and torchaudio must be version-compatible and from the same index."""
+
+    def test_torchaudio_uses_same_index_as_torch(self):
+        """Both torch and torchaudio must be sourced from the same explicit index."""
+        pyproject = _read("pyproject.toml")
+        torch_src = re.search(
+            r'^\[tool\.uv\.sources\].*?^torch\s*=\s*\{[^}]*index\s*=\s*"([^"]+)"',
+            pyproject, re.MULTILINE | re.DOTALL,
+        )
+        torchaudio_src = re.search(
+            r'^\[tool\.uv\.sources\].*?^torchaudio\s*=\s*\{[^}]*index\s*=\s*"([^"]+)"',
+            pyproject, re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(
+            torch_src,
+            "pyproject.toml [tool.uv.sources] must pin torch to an explicit index",
+        )
+        self.assertIsNotNone(
+            torchaudio_src,
+            "pyproject.toml [tool.uv.sources] must pin torchaudio to an explicit index "
+            "(mismatched builds cause WinError 127 / 0xc0000139)",
+        )
+        self.assertEqual(
+            torch_src.group(1), torchaudio_src.group(1),
+            f"torch index '{torch_src.group(1)}' != torchaudio index "
+            f"'{torchaudio_src.group(1)}'. Both must use the same CUDA wheel index.",
+        )
+
+    def test_installed_torch_torchaudio_major_versions_match(self):
+        """Installed torch and torchaudio must share the same major.minor version."""
+        import torch
+        try:
+            import torchaudio
+        except OSError:
+            self.fail(
+                "torchaudio failed to import (likely DLL mismatch with torch). "
+                "Reinstall with: uv sync"
+            )
+
+        # Strip build metadata like +cu128
+        torch_ver = torch.__version__.split("+")[0]
+        ta_ver = torchaudio.__version__.split("+")[0]
+
+        torch_major = torch_ver.split(".")[:2]
+        ta_major = ta_ver.split(".")[:2]
+        self.assertEqual(
+            torch_major, ta_major,
+            f"torch {torch.__version__} and torchaudio {torchaudio.__version__} "
+            f"have mismatched major versions — this causes DLL load failures. "
+            f"Pin both to the same index in pyproject.toml [tool.uv.sources].",
+        )
+
+    def test_installed_torch_torchaudio_build_tags_match(self):
+        """Both packages must have the same build tag (e.g. +cu128 or both CPU)."""
+        import torch
+        try:
+            import torchaudio
+        except OSError:
+            self.fail("torchaudio failed to import (DLL mismatch)")
+
+        torch_tag = torch.__version__.partition("+")[2]  # e.g. "cu128" or ""
+        ta_tag = torchaudio.__version__.partition("+")[2]
+        self.assertEqual(
+            torch_tag, ta_tag,
+            f"torch build tag '+{torch_tag}' != torchaudio build tag '+{ta_tag}'. "
+            f"Mixing CUDA/CPU builds causes WinError 127.",
+        )
+
+
+class TestInstallerHandlesGatedRepos(unittest.TestCase):
+    """dictator-setup.iss must NOT download Cohere and must bundle the Cohere setup script."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.iss_text = _read("installer/dictator-setup.iss")
+
+    def test_iss_checks_exit_code_2_for_granite(self):
+        """The ISS script must check ResultCode after Granite download."""
+        self.assertIsNotNone(
+            re.search(r"download-model --engine granite.*?ResultCode",
+                       self.iss_text, re.DOTALL),
+            "dictator-setup.iss does not check ResultCode "
+            "after the Granite model download.",
+        )
+
+    def test_iss_does_not_download_cohere(self):
+        """The ISS script must NOT attempt to download the Cohere model."""
+        self.assertIsNone(
+            re.search(r"download-model --engine cohere", self.iss_text),
+            "dictator-setup.iss must not contain 'download-model --engine cohere' — "
+            "Cohere downloads are handled by the separate cohere-model-setup.ps1 script.",
+        )
+
+    def test_iss_bundles_cohere_setup_script(self):
+        """The ISS [Files] section must include cohere-model-setup.ps1."""
+        self.assertIsNotNone(
+            re.search(r'cohere-model-setup\.ps1', self.iss_text),
+            "dictator-setup.iss must reference cohere-model-setup.ps1 in the [Files] section.",
+        )
+
+    def test_exit_code_constants_match_python(self):
+        """The exit code comment in .iss must match the Python constants."""
+        from dictator.model_downloader import EXIT_AUTH_REQUIRED, EXIT_FAILURE, EXIT_SUCCESS
+        self.assertIn(
+            f"{EXIT_SUCCESS} = success", self.iss_text,
+            "ISS exit code comment for success doesn't match Python EXIT_SUCCESS",
+        )
+        self.assertIn(
+            f"{EXIT_FAILURE} = failure", self.iss_text,
+            "ISS exit code comment for failure doesn't match Python EXIT_FAILURE",
+        )
+        self.assertIn(
+            f"{EXIT_AUTH_REQUIRED} = auth required", self.iss_text,
+            "ISS exit code comment for auth required doesn't match Python EXIT_AUTH_REQUIRED",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

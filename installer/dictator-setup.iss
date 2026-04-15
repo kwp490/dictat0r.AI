@@ -58,6 +58,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 ; Bundle entire PyInstaller output directory
 Source: "..\dist\dictator\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Cohere model installer script (launched separately if user opts in)
+Source: "cohere-model-setup.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
 ; Create writable data subdirectories
@@ -101,6 +103,9 @@ Filename: "powershell.exe"; \
 var
   EnginePage: TWizardPage;
   GpuInfoLabel: TNewStaticText;
+  GraniteOnlyRadio: TNewRadioButton;
+  GraniteCohereRadio: TNewRadioButton;
+  InstallCohere: Boolean;
   DownloadPage: TOutputProgressWizardPage;
   SummaryPage: TWizardPage;
   SummaryMemo: TNewMemo;
@@ -161,15 +166,15 @@ begin
   Result := 'granite';
 end;
 
-// ── Create Engine Information wizard page ────────────────────────────────────
+// ── Create Engine Selection wizard page ──────────────────────────────────────
 procedure CreateEngineInfoPage;
 var
   Lbl: TNewStaticText;
   TopPos: Integer;
 begin
   EnginePage := CreateCustomPage(wpSelectDir,
-    'Speech Engines',
-    'dictat0r.AI includes two speech-to-text engines. Both will be downloaded during installation.');
+    'Speech Engine Selection',
+    'Choose which speech engines to install. You can add Cohere later if needed.');
 
   DetectedGPU := DetectGPU;
   TopPos := 0;
@@ -250,72 +255,59 @@ begin
   TopPos := TopPos + ScaleY(12);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Section 2 — Granite Engine (default)
+  // Section 2 — Engine choice radio buttons
   // ═══════════════════════════════════════════════════════════════════════════
   Lbl := TNewStaticText.Create(EnginePage);
   Lbl.Parent := EnginePage.Surface;
   Lbl.Left := 0;
   Lbl.Top := TopPos;
   Lbl.Width := EnginePage.SurfaceWidth;
-  Lbl.Caption := 'IBM Granite 4.0 1B Speech  (default engine)';
+  Lbl.Caption := 'Select engines to install';
   Lbl.Font.Style := [fsBold];
   Lbl.Font.Size := 9;
-  TopPos := TopPos + ScaleY(20);
+  TopPos := TopPos + ScaleY(22);
+
+  GraniteOnlyRadio := TNewRadioButton.Create(EnginePage);
+  GraniteOnlyRadio.Parent := EnginePage.Surface;
+  GraniteOnlyRadio.Left := ScaleX(8);
+  GraniteOnlyRadio.Top := TopPos;
+  GraniteOnlyRadio.Width := EnginePage.SurfaceWidth - ScaleX(8);
+  GraniteOnlyRadio.Caption := 'Granite only (recommended)';
+  GraniteOnlyRadio.Font.Style := [fsBold];
+  GraniteOnlyRadio.Checked := True;
+  TopPos := TopPos + ScaleY(16);
 
   Lbl := TNewStaticText.Create(EnginePage);
   Lbl.Parent := EnginePage.Surface;
-  Lbl.Left := ScaleX(8);
+  Lbl.Left := ScaleX(28);
   Lbl.Top := TopPos;
-  Lbl.Width := EnginePage.SurfaceWidth - ScaleX(8);
+  Lbl.Width := EnginePage.SurfaceWidth - ScaleX(28);
   Lbl.AutoSize := False;
   Lbl.WordWrap := True;
-  Lbl.Height := ScaleY(36);
-  Lbl.Caption := 'A compact 1B-parameter speech model from IBM. Fast and lightweight,' + #13#10 +
-                 'ideal for real-time dictation. Uses ~3 GB VRAM.';
-  TopPos := TopPos + ScaleY(40);
+  Lbl.Height := ScaleY(28);
+  Lbl.Caption := 'IBM Granite 4.0 1B Speech — compact, fast, ideal for real-time dictation. ~3 GB VRAM.';
+  Lbl.Font.Color := $808080;
+  TopPos := TopPos + ScaleY(32);
 
-  TopPos := TopPos + ScaleY(8);
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Section 3 — Cohere Engine
-  // ═══════════════════════════════════════════════════════════════════════════
-  Lbl := TNewStaticText.Create(EnginePage);
-  Lbl.Parent := EnginePage.Surface;
-  Lbl.Left := 0;
-  Lbl.Top := TopPos;
-  Lbl.Width := EnginePage.SurfaceWidth;
-  Lbl.Caption := 'Cohere Transcribe 03-2026';
-  Lbl.Font.Style := [fsBold];
-  Lbl.Font.Size := 9;
-  TopPos := TopPos + ScaleY(20);
+  GraniteCohereRadio := TNewRadioButton.Create(EnginePage);
+  GraniteCohereRadio.Parent := EnginePage.Surface;
+  GraniteCohereRadio.Left := ScaleX(8);
+  GraniteCohereRadio.Top := TopPos;
+  GraniteCohereRadio.Width := EnginePage.SurfaceWidth - ScaleX(8);
+  GraniteCohereRadio.Caption := 'Granite + Cohere (requires free HuggingFace account)';
+  GraniteCohereRadio.Font.Style := [fsBold];
+  TopPos := TopPos + ScaleY(16);
 
   Lbl := TNewStaticText.Create(EnginePage);
   Lbl.Parent := EnginePage.Surface;
-  Lbl.Left := ScaleX(8);
+  Lbl.Left := ScaleX(28);
   Lbl.Top := TopPos;
-  Lbl.Width := EnginePage.SurfaceWidth - ScaleX(8);
+  Lbl.Width := EnginePage.SurfaceWidth - ScaleX(28);
   Lbl.AutoSize := False;
   Lbl.WordWrap := True;
-  Lbl.Height := ScaleY(36);
-  Lbl.Caption := 'A high-accuracy 2B-parameter speech model from Cohere. Supports 14' + #13#10 +
-                 'languages with top-tier accuracy. Uses ~5 GB VRAM.';
-  TopPos := TopPos + ScaleY(40);
-
-  TopPos := TopPos + ScaleY(8);
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Note — both engines are always installed
-  // ═══════════════════════════════════════════════════════════════════════════
-  Lbl := TNewStaticText.Create(EnginePage);
-  Lbl.Parent := EnginePage.Surface;
-  Lbl.Left := ScaleX(8);
-  Lbl.Top := TopPos;
-  Lbl.Width := EnginePage.SurfaceWidth - ScaleX(8);
-  Lbl.AutoSize := False;
-  Lbl.WordWrap := True;
-  Lbl.Height := ScaleY(36);
-  Lbl.Caption := 'Both engines are installed and you can switch between them at any time' + #13#10 +
-                 'from the Settings dialog. Granite is set as the default engine.';
+  Lbl.Height := ScaleY(42);
+  Lbl.Caption := 'Cohere Transcribe 03-2026 — high-accuracy 2B-parameter model, 14 languages. ~5 GB VRAM.' + #13#10 +
+                 'Requires a free HuggingFace account. A separate setup wizard will guide you after install.';
   Lbl.Font.Color := $808080;
 end;
 
@@ -325,11 +317,13 @@ function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
 var
   Info: String;
 begin
+  // Read engine choice from radio buttons
+  InstallCohere := GraniteCohereRadio.Checked;
+
   Info := '';
 
   Info := Info + 'Application:' + NewLine;
   Info := Info + Space + 'dictat0r.AI {#MyAppVersion} — Native Windows Voice-to-Text' + NewLine;
-  Info := Info + Space + 'Real-time speech transcription powered by Granite and Cohere.' + NewLine;
   Info := Info + NewLine;
 
   if MemoDirInfo <> '' then
@@ -338,19 +332,28 @@ begin
     Info := Info + NewLine;
   end;
 
-  Info := Info + 'Speech engines:' + NewLine;
-  Info := Info + Space + 'IBM Granite 4.0 1B Speech  (~3 GB VRAM, default)' + NewLine;
-  Info := Info + Space + 'Cohere Transcribe 03-2026  (~5 GB VRAM)' + NewLine;
-  Info := Info + NewLine;
+  if InstallCohere then
+  begin
+    Info := Info + 'Speech engines:' + NewLine;
+    Info := Info + Space + 'IBM Granite 4.0 1B Speech  (~3 GB VRAM, default)' + NewLine;
+    Info := Info + Space + 'Cohere Transcribe 03-2026  (~5 GB VRAM, separate setup will follow)' + NewLine;
+    Info := Info + NewLine;
+  end else
+  begin
+    Info := Info + 'Speech engine:' + NewLine;
+    Info := Info + Space + 'IBM Granite 4.0 1B Speech  (~3 GB VRAM, default)' + NewLine;
+    Info := Info + NewLine;
+  end;
 
   Info := Info + 'The installer will:' + NewLine;
   Info := Info + Space + '1. Extract dictat0r.AI application files' + NewLine;
   Info := Info + Space + '   Includes: dictator.exe, PySide6 (Qt GUI), transformers,' + NewLine;
   Info := Info + Space + '   PyTorch, sounddevice, numpy, and CUDA runtime libraries' + NewLine;
   Info := Info + Space + '2. Download Granite model from HuggingFace' + NewLine;
-  Info := Info + Space + '3. Download Cohere model from HuggingFace' + NewLine;
-  Info := Info + Space + '4. Create desktop and Start Menu shortcuts' + NewLine;
-  Info := Info + Space + '5. Configure Windows Defender exclusions' + NewLine;
+  if InstallCohere then
+    Info := Info + Space + '3. Launch separate Cohere model setup wizard' + NewLine;
+  Info := Info + Space + '3. Create desktop and Start Menu shortcuts' + NewLine;
+  Info := Info + Space + '4. Configure Windows Defender exclusions' + NewLine;
   Info := Info + NewLine;
 
   if DetectedGPU <> '' then
@@ -464,14 +467,17 @@ begin
   ExePath := ExpandConstant('{app}\{#MyAppExeName}');
   ModelsDir := ExpandConstant('{app}\models');
 
-  // Download Granite model
+  // Exit codes from dictator.model_downloader:
+  //   0 = success, 1 = failure, 2 = auth required (gated repo)
+
+  // Download Granite model (anonymous — public repo)
   DownloadPage := CreateOutputProgressPage('Downloading Models',
     'Downloading the Granite speech recognition model. This may take several minutes.');
   DownloadPage.Show;
 
   DownloadPage.SetText('Downloading Granite model (ibm-granite/granite-4.0-1b-speech)...',
     'Source: huggingface.co/ibm-granite/granite-4.0-1b-speech');
-  DownloadPage.SetProgress(0, 2);
+  DownloadPage.SetProgress(0, 1);
   try
     Exec(ExePath, 'download-model --engine granite --target-dir "' + ModelsDir + '"',
          '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -486,26 +492,7 @@ begin
            'You can download models later from the application.',
            mbError, MB_OK);
   end;
-  DownloadPage.SetProgress(1, 2);
-
-  // Download Cohere model
-  DownloadPage.SetText('Downloading Cohere model (CohereLabs/cohere-transcribe-03-2026)...',
-    'Source: huggingface.co/CohereLabs/cohere-transcribe-03-2026');
-  try
-    Exec(ExePath, 'download-model --engine cohere --target-dir "' + ModelsDir + '"',
-         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    if ResultCode <> 0 then
-      MsgBox('Cohere model download failed (exit code ' + IntToStr(ResultCode) + ').' + #13#10 + #13#10 +
-             'You can download it later by running:' + #13#10 +
-             '"' + ExePath + '" download-model --engine cohere' + #13#10 + #13#10 +
-             'Or from the application: the model will be downloaded on first launch.',
-             mbError, MB_OK);
-  except
-    MsgBox('Could not start Cohere model download.' + #13#10 +
-           'You can download models later from the application.',
-           mbError, MB_OK);
-  end;
-  DownloadPage.SetProgress(2, 2);
+  DownloadPage.SetProgress(1, 1);
 
   DownloadPage.Hide;
 end;
@@ -515,13 +502,22 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   Summary: String;
   InstDir, ModelsDir: String;
-  GraniteReady, CohereReady: Boolean;
+  GraniteReady: Boolean;
+  ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
     MigrateOldData;
     WriteDefaultSettings;
     DownloadModels;
+
+    // Launch Cohere model installer if the user opted in
+    if InstallCohere then
+    begin
+      Exec('powershell.exe',
+           '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\cohere-model-setup.ps1"',
+           '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
+    end;
 
     InstDir := ExpandConstant('{app}');
     ModelsDir := InstDir + '\models';
@@ -539,11 +535,14 @@ begin
     else
       Summary := Summary + '  [!!] Granite — download failed (run dictator.exe download-model --engine granite)' + #13#10;
 
-    CohereReady := DirExists(ModelsDir + '\cohere');
-    if CohereReady then
-      Summary := Summary + '  [OK] Cohere — downloaded to ' + ModelsDir + '\cohere' + #13#10
-    else
-      Summary := Summary + '  [!!] Cohere — download failed (run dictator.exe download-model --engine cohere)' + #13#10;
+    if InstallCohere then
+    begin
+      if DirExists(ModelsDir + '\cohere') then
+        Summary := Summary + '  [OK] Cohere — downloaded to ' + ModelsDir + '\cohere' + #13#10
+      else
+        Summary := Summary + '  [!!] Cohere — setup did not complete (run cohere-model-setup.ps1 to retry)' + #13#10;
+    end else
+      Summary := Summary + '  [--] Cohere — not selected (install later via cohere-model-setup.ps1)' + #13#10;
     Summary := Summary + #13#10;
 
     Summary := Summary + 'DEFAULT ENGINE' + #13#10;

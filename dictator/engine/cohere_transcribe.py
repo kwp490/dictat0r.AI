@@ -50,8 +50,15 @@ class CohereTranscribeEngine(SpeechEngine):
             os.path.join(cohere_dir, "config.json")
         ):
             log.info("Cohere model not found at %s — downloading…", cohere_dir)
-            from dictator.model_downloader import download_model
-            download_model("cohere", model_path)
+            from dictator.model_downloader import download_model, EXIT_SUCCESS, EXIT_AUTH_REQUIRED
+            rc = download_model("cohere", model_path)
+            if rc == EXIT_AUTH_REQUIRED:
+                raise RuntimeError(
+                    f"The Cohere Transcribe model requires authentication. "
+                    f"Please provide a HuggingFace token with access to {COHERE_REPO_ID}."
+                )
+            if rc != EXIT_SUCCESS:
+                raise RuntimeError(f"Failed to download Cohere model from {COHERE_REPO_ID}.")
 
         log.info("Loading Cohere Transcribe from %s", cohere_dir)
 
@@ -63,7 +70,8 @@ class CohereTranscribeEngine(SpeechEngine):
         )
         log.info("Cohere Transcribe loaded on %s", device)
 
-    def _transcribe_impl(self, audio_16k: np.ndarray, language: str) -> str:
+    def _transcribe_impl(self, audio_16k: np.ndarray, language: str,
+                          keywords: str = "") -> str:
         import torch
 
         inputs = self._processor(

@@ -1,11 +1,13 @@
 """Tests for audio recording utilities."""
 
+import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
-from dictator.audio import AudioRecorder
+from dictator.audio import AudioRecorder, play_beep
 
 
 class TestGetRawAudio(unittest.TestCase):
@@ -59,6 +61,29 @@ class TestTrimSilence(unittest.TestCase):
         self.assertIsNotNone(result)
         trimmed, pct = result
         self.assertGreater(len(trimmed), 0)
+
+
+class TestPlayBeep(unittest.TestCase):
+    def test_windows_uses_distinct_synthesized_sounds_for_start_and_stop(self):
+        calls = []
+
+        fake_winsound = SimpleNamespace(
+            SND_MEMORY=4,
+            PlaySound=lambda payload, flags: calls.append((payload, flags)),
+            Beep=lambda freq, dur: calls.append(("tone", freq, dur)),
+        )
+
+        with patch("dictator.audio.sys.platform", "win32"):
+            with patch.dict(sys.modules, {"winsound": fake_winsound}):
+                play_beep((600, 900), block=True)
+                play_beep((900, 500), block=True)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], fake_winsound.SND_MEMORY)
+        self.assertEqual(calls[1][1], fake_winsound.SND_MEMORY)
+        self.assertIsInstance(calls[0][0], bytes)
+        self.assertIsInstance(calls[1][0], bytes)
+        self.assertNotEqual(calls[0][0], calls[1][0])
 
 
 if __name__ == "__main__":

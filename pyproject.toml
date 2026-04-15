@@ -21,8 +21,9 @@ dependencies = [
     "openai>=1.0",
     "keyring>=25.0",
     "transformers>=5.4.0",
+    "accelerate>=1.0",
     "torch>=2.1",
-    "torchaudio",
+    "torchaudio>=2.1",
     "huggingface-hub>=0.34.0",
     "sentencepiece",
     "protobuf",
@@ -50,3 +51,4 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }

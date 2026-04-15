@@ -12,6 +12,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -39,11 +40,15 @@ class AudioRecorder:
         self._queue: queue.Queue[np.ndarray] = queue.Queue()
         self._recording = threading.Event()
         self._stream: Optional[sd.InputStream] = None
+        self._last_callback_time: float = 0.0
+        self._recovery_count: int = 0
+        self._max_recoveries: int = 3
 
     # ── Stream lifecycle ─────────────────────────────────────────────────────
 
     def open_stream(self) -> None:
         """Open and start the persistent microphone stream."""
+        self._last_callback_time = 0.0
         dev = self.device if self.device is not None and self.device >= 0 else None
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
@@ -69,6 +74,54 @@ class AudioRecorder:
                 log.warning("Error closing audio stream", exc_info=True)
             self._stream = None
             log.info("Audio stream closed")
+
+    # ── Stream health ────────────────────────────────────────────────────────
+
+    def stream_is_alive(self, timeout: float = 0.5) -> bool:
+        """Return True if the PortAudio callback has fired recently."""
+        if self._stream is None:
+            return False
+        if self._last_callback_time == 0.0:
+            return False
+        return (time.monotonic() - self._last_callback_time) < timeout
+
+    def recover_stream(self) -> bool:
+        """Close and re-open the stream to recover from a stale state.
+
+        Returns True if the stream is alive after recovery.
+        """
+        if self._recovery_count >= self._max_recoveries:
+            log.error(
+                "Audio recovery limit reached (%d attempts) — "
+                "microphone may be unavailable",
+                self._max_recoveries,
+            )
+            return False
+        self._recovery_count += 1
+        log.warning(
+            "Attempting audio stream recovery (attempt %d/%d)",
+            self._recovery_count,
+            self._max_recoveries,
+        )
+        self.close_stream()
+        try:
+            self.open_stream()
+        except Exception:
+            log.error("Audio stream recovery failed", exc_info=True)
+            return False
+        # Give PortAudio time to deliver the first callback
+        time.sleep(0.3)
+        alive = self.stream_is_alive()
+        if alive:
+            log.info("Audio stream recovery succeeded")
+            self._recovery_count = 0  # reset on success
+        else:
+            log.warning("Audio stream recovery did not restore callback")
+        return alive
+
+    def reset_recovery_count(self) -> None:
+        """Reset the consecutive recovery counter (call after successful recording)."""
+        self._recovery_count = 0
 
     # ── Recording control ────────────────────────────────────────────────────
 
@@ -167,44 +220,60 @@ class AudioRecorder:
 
     def _callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         """PortAudio callback — enqueues frames while recording."""
+        self._last_callback_time = time.monotonic()
         if status:
             log.debug("Audio callback status: %s", status)
         if self._recording.is_set():
             self._queue.put(indata.copy())
 
 
-def play_beep(freqs: Tuple[float, float], duration_ms: int = 80) -> None:
+def play_beep(freqs: Tuple[float, float], duration_ms: int = 80, block: bool = False) -> None:
     """Play a two-tone beep through the system audio.
 
     *freqs* is a pair of frequencies in Hz (tone-1, tone-2).
     Each tone lasts *duration_ms* milliseconds.
-    Runs in a daemon thread so it never blocks the GUI.
+    When *block* is False (default) the beep runs on a daemon thread
+    so it never blocks the caller. On Windows this uses a synthesized
+    in-memory WAV with ``winsound.PlaySound`` so start/stop cues remain
+    distinct regardless of the user's system sound theme, without using
+    the unstable tone-generator API.
     """
+    def _build_tone_sequence() -> np.ndarray:
+        sr = 44100
+        vol = 0.28
+        parts = []
+        for freq in freqs:
+            t = np.linspace(
+                0,
+                duration_ms / 1000,
+                int(sr * duration_ms / 1000),
+                endpoint=False,
+                dtype=np.float32,
+            )
+            tone = (vol * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+            fade = int(sr * 0.006)
+            if 0 < fade < len(tone):
+                ramp = np.linspace(0, 1, fade, dtype=np.float32)
+                tone[:fade] *= ramp
+                tone[-fade:] *= ramp[::-1]
+            parts.append(tone)
+        return np.concatenate(parts)
+
     def _beep() -> None:
         try:
+            samples = _build_tone_sequence()
             if sys.platform == "win32":
                 import winsound
-                for freq in freqs:
-                    winsound.Beep(int(freq), duration_ms)
+                wav_io = io.BytesIO()
+                sf.write(wav_io, samples, 44100, format="WAV")
+                winsound.PlaySound(wav_io.getvalue(), winsound.SND_MEMORY)
             else:
-                # Fallback: synthesize with sounddevice
-                sr = 44100
-                vol = 0.35
-                parts = []
-                for freq in freqs:
-                    t = np.linspace(0, duration_ms / 1000,
-                                    int(sr * duration_ms / 1000),
-                                    endpoint=False, dtype=np.float32)
-                    tone = (vol * np.sin(2 * np.pi * freq * t)).astype(np.float32)
-                    fade = int(sr * 0.005)
-                    if 0 < fade < len(tone):
-                        ramp = np.linspace(0, 1, fade, dtype=np.float32)
-                        tone[:fade] *= ramp
-                        tone[-fade:] *= ramp[::-1]
-                    parts.append(tone)
-                sd.play(np.concatenate(parts), samplerate=sr)
+                sd.play(samples, samplerate=44100)
                 sd.wait()
         except Exception:
             log.debug("Beep playback failed", exc_info=True)
 
-    threading.Thread(target=_beep, daemon=True).start()
+    t = threading.Thread(target=_beep, daemon=True)
+    t.start()
+    if block:
+        t.join()

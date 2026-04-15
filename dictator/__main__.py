@@ -17,6 +17,7 @@ import faulthandler
 import io
 import logging
 import logging.handlers
+import multiprocessing
 import os
 import sys
 
@@ -123,6 +124,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory to store models (default: C:\\Program Files\\dictat0r.AI\\models)",
     )
+    dl.add_argument(
+        "--token",
+        default=None,
+        help="HuggingFace access token for gated model downloads",
+    )
 
     return parser
 
@@ -135,7 +141,7 @@ def _cmd_download_model(args: argparse.Namespace) -> int:
     target_dir = args.target_dir or DEFAULT_MODELS_DIR
     os.makedirs(target_dir, exist_ok=True)
 
-    return download_model(args.engine, target_dir)
+    return download_model(args.engine, target_dir, token=args.token)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -187,4 +193,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     sys.exit(main())

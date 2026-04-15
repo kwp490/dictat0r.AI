@@ -28,6 +28,7 @@
     .\Test-Dictator.ps1 -Mode Source    # skip menu, run from source
     .\Test-Dictator.ps1 -Mode Release   # skip menu, full release cycle
     .\Test-Dictator.ps1 -Mode Source -SkipTests   # skip tests, run from source
+    .\Test-Dictator.ps1 -Mode Release -Fast        # release build with fast compression
 
 .NOTES
     Run from the repository root.
@@ -38,7 +39,11 @@ param(
     [ValidateSet('Release', 'Source')]
     [string]$Mode,
 
-    [switch]$SkipTests
+    [switch]$SkipTests,
+
+    [switch]$Clean,
+
+    [switch]$Fast
 )
 
 Set-StrictMode -Version Latest
@@ -54,6 +59,14 @@ function Write-Ok($msg)    { Write-Host "  [OK] $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
 function Write-Err($msg)   { Write-Host "  [ERROR] $msg" -ForegroundColor Red }
 function Write-Info($msg)  { Write-Host "  $msg" -ForegroundColor DarkGray }
+
+function Get-RelativeFileList([string]$RootPath) {
+    if (-not (Test-Path $RootPath)) { return @() }
+    $root = (Resolve-Path $RootPath).Path
+    return Get-ChildItem -Path $root -Recurse -File |
+        ForEach-Object { $_.FullName.Substring($root.Length).TrimStart('\\') } |
+        Sort-Object -Unique
+}
 
 function Exit-Script([int]$code = 1) {
     Pop-Location
@@ -128,10 +141,46 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "Dependencies synced"
 
+# 1d. Verify torch/torchaudio compatibility (mismatched builds cause WinError 127)
+Write-Step "Checking torch / torchaudio compatibility..."
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$torchCheck = uv run python -c "
+import torch, torchaudio, sys
+tv = torch.__version__; tav = torchaudio.__version__
+t_base = tv.split('+')[0]; ta_base = tav.split('+')[0]
+t_tag = tv.partition('+')[2]; ta_tag = tav.partition('+')[2]
+ok = True
+if t_base.rsplit('.', 1)[0] != ta_base.rsplit('.', 1)[0]:
+    print(f'FAIL: torch {tv} and torchaudio {tav} have mismatched major versions')
+    ok = False
+if t_tag != ta_tag:
+    print(f'FAIL: torch build +{t_tag} != torchaudio build +{ta_tag} (CUDA/CPU mismatch)')
+    ok = False
+if ok:
+    print(f'OK: torch={tv}  torchaudio={tav}')
+sys.exit(0 if ok else 1)
+" 2>&1
+$ErrorActionPreference = $prevPref
+$torchCheck | ForEach-Object { Write-Host "  $_" }
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "torch/torchaudio mismatch will cause DLL load failures at runtime."
+    Write-Info "Fix: ensure both use the same index in pyproject.toml [tool.uv.sources], then run 'uv sync'."
+    Exit-Script 1
+}
+Write-Ok "torch/torchaudio compatible"
+
 
 # ==============================================================================
 #  PHASE 2 -- Run test suite (shared)
 # ==============================================================================
+
+# In Release mode, pytest runs before the fresh PyInstaller build. Remove any
+# stale dist/ tree first so frozen-build dist assertions do not read an old bundle.
+if ($Mode -eq 'Release' -and (Test-Path "dist\dictator")) {
+    Remove-Item 'dist\dictator' -Recurse -Force
+    Write-Ok "Removed stale dist\dictator before pre-build tests"
+}
 
 if ($SkipTests) {
     Write-Warn "Test suite skipped (-SkipTests)"
@@ -182,6 +231,8 @@ if ($Mode -eq 'Release') {
             '-Mode', 'Release'
         )
         if ($SkipTests) { $elevateArgs += '-SkipTests' }
+        if ($Clean)     { $elevateArgs += '-Clean' }
+        if ($Fast)      { $elevateArgs += '-Fast' }
         try {
             Start-Process powershell.exe -Verb RunAs -ArgumentList $elevateArgs
         } catch {
@@ -202,10 +253,14 @@ if ($Mode -eq 'Release') {
         Exit-Script 1
     }
 
+    $buildArgs = @()
+    if ($Clean) { $buildArgs += '-Clean' }
+    if ($Fast)  { $buildArgs += '-Fast' }
+
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $buildScript 2>&1 | ForEach-Object { Write-Host "  $_" }
+        & $buildScript @buildArgs 2>&1 | ForEach-Object { Write-Host "  $_" }
     } finally {
         $ErrorActionPreference = $prevPref
     }
@@ -214,6 +269,22 @@ if ($Mode -eq 'Release') {
         Exit-Script 1
     }
     Write-Ok "Installer built successfully"
+
+    # Validate the freshly built frozen bundle now that dist/ reflects the
+    # current spec and source tree.
+    Write-Step "Validating fresh frozen build (uv run pytest tests/test_frozen_compat.py -v)..."
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        uv run pytest tests/test_frozen_compat.py -v --tb=short 2>&1 | ForEach-Object { Write-Host "  $_" }
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Frozen-build validation failed (exit code $LASTEXITCODE)."
+        Exit-Script 1
+    }
+    Write-Ok "Fresh frozen build validated"
 
     # -- Step 3: Silent uninstall ----------------------------------------------
     Write-Step "Checking for existing dictat0r.AI installation..."
@@ -287,6 +358,36 @@ if ($Mode -eq 'Release') {
         Exit-Script 1
     }
     Write-Ok "dictat0r.AI installed successfully"
+
+    # -- Step 4b: Verify installed bundle matches freshly-built dist ----------
+    $distTorchLib = Join-Path $RepoRoot 'dist\dictator\_internal\torch\lib'
+    $installedTorchLib = 'C:\Program Files\dictat0r.AI\_internal\torch\lib'
+    Write-Step "Verifying installed torch DLL bundle..."
+
+    $distTorchDlls = Get-RelativeFileList $distTorchLib
+    $installedTorchDlls = Get-RelativeFileList $installedTorchLib
+    $missingTorchDlls = @($distTorchDlls | Where-Object { $_ -notin $installedTorchDlls })
+
+    if ($distTorchDlls.Count -eq 0) {
+        Write-Err "Fresh dist torch DLLs not found at $distTorchLib"
+        Exit-Script 1
+    }
+    if (-not (Test-Path $installedTorchLib)) {
+        Write-Err "Installed torch DLL directory not found at $installedTorchLib"
+        Exit-Script 1
+    }
+    if ($missingTorchDlls.Count -gt 0) {
+        Write-Err "Installed app is missing $($missingTorchDlls.Count) torch DLL(s) from the fresh build."
+        $preview = $missingTorchDlls | Select-Object -First 10
+        foreach ($name in $preview) {
+            Write-Info "Missing: $name"
+        }
+        if ($missingTorchDlls.Count -gt $preview.Count) {
+            Write-Info "...and $($missingTorchDlls.Count - $preview.Count) more"
+        }
+        Exit-Script 1
+    }
+    Write-Ok "Installed torch DLL bundle matches dist"
 
     # -- Step 5: Launch --------------------------------------------------------
     Write-Step "Launching dictat0r.AI (installed build)..."

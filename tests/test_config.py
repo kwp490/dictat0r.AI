@@ -10,10 +10,12 @@ class SettingsConfigTests(unittest.TestCase):
     def test_save_and_load_round_trip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "settings.json"
+            models_dir = Path(temp_dir) / "models"
+            models_dir.mkdir()
 
             settings = Settings(
                 engine="cohere",
-                model_path="/tmp/models",
+                model_path=str(models_dir),
                 device="cpu",
                 auto_copy=False,
             )
@@ -22,7 +24,7 @@ class SettingsConfigTests(unittest.TestCase):
             loaded = Settings.load(config_path)
 
             self.assertEqual(loaded.engine, "cohere")
-            self.assertEqual(loaded.model_path, "/tmp/models")
+            self.assertEqual(loaded.model_path, str(models_dir))
             self.assertEqual(loaded.device, "cpu")
             self.assertFalse(loaded.auto_copy)
 

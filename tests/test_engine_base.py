@@ -22,7 +22,8 @@ class _StubEngine(SpeechEngine):
     def load(self, model_path: str, device: str = "cuda") -> None:
         self._model = MagicMock()
 
-    def _transcribe_impl(self, audio_16k: np.ndarray, language: str) -> str:
+    def _transcribe_impl(self, audio_16k: np.ndarray, language: str,
+                          keywords: str = "") -> str:
         return "hello world"
 
     def unload(self) -> None:

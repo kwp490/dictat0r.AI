@@ -187,6 +187,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self._pool = QThreadPool.globalInstance()
+        self._engine_pool = QThreadPool(self)
+        self._engine_pool.setMaxThreadCount(1)
+        self._engine_pool.setExpiryTimeout(-1)
 
         # ── Engine ───────────────────────────────────────────────────────────
         if engine is not None:
@@ -226,6 +229,7 @@ class MainWindow(QMainWindow):
         self._model_status = ModelStatus.NOT_LOADED
         self._model_load_start: float = 0.0
         self._last_resume_time: float = 0.0
+        self._mic_suspended_for_processing = False
 
         # ── Resource monitor ─────────────────────────────────────────────────
         self._res_monitor = ResourceMonitor(
@@ -597,7 +601,7 @@ class MainWindow(QMainWindow):
         worker = Worker(_do_load)
         worker.signals.result.connect(self._on_model_loaded)
         worker.signals.error.connect(self._on_model_load_error)
-        self._pool.start(worker)
+        self._engine_pool.start(worker)
 
     @Slot(object)
     def _on_model_loaded(self, _result) -> None:
@@ -637,7 +641,7 @@ class MainWindow(QMainWindow):
         worker = Worker(_do_reload)
         worker.signals.result.connect(self._on_model_loaded)
         worker.signals.error.connect(self._on_model_load_error)
-        self._pool.start(worker)
+        self._engine_pool.start(worker)
 
     # ── Resource metrics ──────────────────────────────────────────────────────
 
@@ -702,7 +706,7 @@ class MainWindow(QMainWindow):
         worker = Worker(_do_validate)
         worker.signals.result.connect(self._on_validate_result)
         worker.signals.error.connect(lambda e: self._on_validate_result((False, str(e))))
-        self._pool.start(worker)
+        self._engine_pool.start(worker)
 
     @Slot(object)
     def _on_validate_result(self, result: tuple) -> None:
@@ -738,6 +742,17 @@ class MainWindow(QMainWindow):
         if self._model_status not in (ModelStatus.READY, ModelStatus.VALIDATED):
             self._log_ui("Cannot record — model not ready yet", error=True)
             return
+        # Health-check the audio stream before recording
+        if not self._recorder.stream_is_alive():
+            self._log_ui("Audio stream stale — attempting recovery…")
+            if not self._recorder.recover_stream():
+                self._log_ui(
+                    "Microphone not responding — try changing the audio "
+                    "device in Settings",
+                    error=True,
+                )
+                return
+            self._log_ui("Audio stream recovered")
         play_beep((600, 900))   # ascending chirp → "go!"
         self._recorder.start_recording()
         self._set_dictation_state(DictationState.RECORDING)
@@ -774,6 +789,8 @@ class MainWindow(QMainWindow):
 
         self._log_ui(f"Recording stopped \u2014 captured {len(audio)/self.settings.sample_rate:.1f}s of audio")
 
+        self._suspend_mic_stream_for_processing()
+
         # Heavy work on thread pool — NO clipboard ops here
         def _process():
             # Trim silence
@@ -790,19 +807,21 @@ class MainWindow(QMainWindow):
 
             # Transcribe in-process
             text = self._engine.transcribe(
-                trimmed, self.settings.sample_rate, self.settings.language
+                trimmed, self.settings.sample_rate, self.settings.language,
+                keywords=self.settings.keywords,
             )
             return text
 
         worker = Worker(_process)
         worker.signals.result.connect(self._on_transcription_result)
         worker.signals.error.connect(self._on_transcription_error)
-        self._pool.start(worker)
+        self._engine_pool.start(worker)
 
     @Slot(object)
     def _on_transcription_result(self, text: str) -> None:
         """Handle transcription result — runs on MAIN THREAD (safe for clipboard)."""
         self._res_monitor.start()
+        self._resume_mic_stream_after_processing()
         text = str(text).strip()
         ts = datetime.datetime.now().strftime("%H:%M:%S")
 
@@ -999,6 +1018,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_transcription_error(self, err: str) -> None:
         self._res_monitor.start()
+        self._resume_mic_stream_after_processing()
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self._set_dictation_state(DictationState.ERROR)
         self._log_ui(f"Transcription error: {err}", error=True)
@@ -1070,6 +1090,44 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
 
+    def _suspend_mic_stream_for_processing(self) -> None:
+        """Close the live input stream before model inference starts."""
+        if self._mic_suspended_for_processing:
+            return
+        try:
+            self._recorder.close_stream()
+            self._mic_suspended_for_processing = True
+            self._log_ui("Microphone stream suspended for transcription")
+        except Exception as exc:
+            self._log_ui(f"Microphone suspend failed: {exc}", error=True)
+
+    def _resume_mic_stream_after_processing(self) -> None:
+        """Re-open the live input stream after model inference finishes."""
+        if not self._mic_suspended_for_processing:
+            return
+        try:
+            self._recorder.open_stream()
+            self._log_ui("Microphone stream resumed")
+        except Exception as exc:
+            self._log_ui(f"Microphone resume failed: {exc}", error=True)
+        finally:
+            self._mic_suspended_for_processing = False
+
+        # Delayed health check — verify the stream is actually delivering audio
+        def _verify_stream():
+            if not self._recorder.stream_is_alive():
+                self._log_ui("Microphone stream stale after resume — recovering…")
+                if self._recorder.recover_stream():
+                    self._log_ui("Microphone stream recovered after resume")
+                else:
+                    self._log_ui(
+                        "Microphone recovery failed — try changing the "
+                        "audio device in Settings",
+                        error=True,
+                    )
+
+        QTimer.singleShot(500, _verify_stream)
+
     # ═════════════════════════════════════════════════════════════════════════
     # SETTINGS
     # ═════════════════════════════════════════════════════════════════════════
@@ -1092,6 +1150,19 @@ class MainWindow(QMainWindow):
                 or self.settings.model_path != old_model_path
                 or self.settings.device != old_device
             ):
+                # Cohere model requires gated access — check before switching
+                if (
+                    self.settings.engine == "cohere"
+                    and self.settings.engine != old_engine
+                    and not self._cohere_model_ready()
+                ):
+                    if not self._prompt_cohere_setup():
+                        # User declined or setup failed — revert engine
+                        self.settings.engine = old_engine
+                        self.settings.save()
+                        self._log_ui("Cohere setup cancelled — engine unchanged")
+                        return
+
                 reply = QMessageBox.question(
                     self,
                     "Reload Model?",
@@ -1108,6 +1179,129 @@ class MainWindow(QMainWindow):
                             self._engine = engine_cls()
                             self._lbl_engine.setText(f"Engine: {self._engine.name}")
                     self._on_reload_model()
+
+    # ── Cohere model setup helpers ────────────────────────────────────────────
+
+    def _cohere_model_ready(self) -> bool:
+        """Return True if Cohere model files are present locally."""
+        from .model_downloader import model_ready
+        return model_ready("cohere", self.settings.model_path)
+
+    def _prompt_cohere_setup(self) -> bool:
+        """Show a dialog explaining Cohere access requirements.
+
+        If the user chooses to proceed, launch ``cohere-model-setup.ps1``
+        and return True if the model was successfully downloaded.
+        If the user declines, return False.
+        """
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle("Cohere Transcribe — Setup Required")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(
+            "The Cohere Transcribe model requires a free HuggingFace account "
+            "and access approval before it can be downloaded."
+        )
+        msg.setInformativeText(
+            "<b>Steps to get access:</b><br><br>"
+            "1. Create a free account at:<br>"
+            '&nbsp;&nbsp;&nbsp;<a href="https://huggingface.co/join">'
+            "https://huggingface.co/join</a><br><br>"
+            "2. Visit the model page and click<br>"
+            '&nbsp;&nbsp;&nbsp;"Agree and access repository":<br>'
+            '&nbsp;&nbsp;&nbsp;<a href="https://huggingface.co/CohereLabs/cohere-transcribe-03-2026">'
+            "https://huggingface.co/CohereLabs/cohere-transcribe-03-2026</a><br><br>"
+            "3. Create an access token (Read permission):<br>"
+            '&nbsp;&nbsp;&nbsp;<a href="https://huggingface.co/settings/tokens">'
+            "https://huggingface.co/settings/tokens</a><br><br>"
+            "Would you like to run the Cohere model setup now?"
+        )
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return False
+
+        # Launch cohere-model-setup.ps1
+        return self._run_cohere_setup_script()
+
+    def _run_cohere_setup_script(self) -> bool:
+        """Launch ``cohere-model-setup.ps1`` elevated and return True if
+        the model is present afterwards."""
+        import subprocess
+
+        from .config import INSTALL_DIR
+
+        # In production the script lives next to dictator.exe in INSTALL_DIR.
+        # During development DICTATOR_HOME points at dev-temp/, so fall back
+        # to the repo's installer/ directory.
+        script = INSTALL_DIR / "cohere-model-setup.ps1"
+        if not script.is_file():
+            repo_root = Path(__file__).resolve().parent.parent
+            script = repo_root / "installer" / "cohere-model-setup.ps1"
+        if not script.is_file():
+            QMessageBox.critical(
+                self,
+                "Setup Script Missing",
+                f"Could not find cohere-model-setup.ps1 in:\n"
+                f"  {INSTALL_DIR}\n"
+                f"  {Path(__file__).resolve().parent.parent / 'installer'}\n\n"
+                "Please reinstall dictat0r.AI or run the Cohere setup manually.",
+            )
+            return False
+
+        self._log_ui("Launching Cohere model setup…")
+        try:
+            # Use ShellExecute with 'runas' to request elevation
+            import ctypes
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                "powershell.exe",
+                (
+                    f'-NoProfile -ExecutionPolicy Bypass '
+                    f'-File "{script}"'
+                ),
+                str(INSTALL_DIR),
+                1,  # SW_SHOWNORMAL
+            )
+            if ret <= 32:
+                self._log_ui("Cohere setup was cancelled or failed to launch", error=True)
+                return False
+
+            # ShellExecuteW doesn't wait — use a polling approach with a
+            # subprocess that waits for the PowerShell window to finish.
+            # Instead, just prompt the user to confirm when done.
+            confirm = QMessageBox.question(
+                self,
+                "Cohere Setup",
+                "The Cohere model setup wizard has been launched in a\n"
+                "separate window. Click OK once it has finished.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+            if confirm == QMessageBox.StandardButton.Cancel:
+                return False
+
+        except Exception as exc:
+            self._log_ui(f"Failed to launch Cohere setup: {exc}", error=True)
+            return False
+
+        # Check if the model was actually downloaded
+        if self._cohere_model_ready():
+            self._log_ui("Cohere model is ready")
+            return True
+        else:
+            QMessageBox.warning(
+                self,
+                "Cohere Model Not Found",
+                "The Cohere model was not detected after setup.\n\n"
+                "You can try again later from Settings, or run\n"
+                "cohere-model-setup.ps1 from the install directory.",
+            )
+            return False
 
     def _apply_settings(self) -> None:
         """Re-apply changed settings to live components."""

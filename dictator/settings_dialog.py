@@ -86,6 +86,15 @@ class SettingsDialog(QDialog):
         self._inference_timeout.setSuffix(" s")
         engine_form.addRow("Inference timeout:", self._inference_timeout)
 
+        self._keywords = QLineEdit()
+        self._keywords.setPlaceholderText("e.g. PyTorch, CUDA, dictat0r.AI")
+        self._keywords.setToolTip(
+            "Comma-separated keywords to bias transcription towards "
+            "(domain-specific terms, proper nouns, etc.). "
+            "Currently used by the Granite engine only."
+        )
+        engine_form.addRow("Keywords:", self._keywords)
+
         engine_group.setLayout(engine_form)
         layout.addWidget(engine_group)
 
@@ -171,6 +180,7 @@ class SettingsDialog(QDialog):
             self._device_combo.setCurrentIndex(idx)
         self._language.setText(s.language)
         self._inference_timeout.setValue(s.inference_timeout)
+        self._keywords.setText(s.keywords)
         self._silence_threshold.setValue(s.silence_threshold)
         self._silence_margin.setValue(s.silence_margin_ms)
         self._sample_rate.setValue(s.sample_rate)
@@ -194,6 +204,7 @@ class SettingsDialog(QDialog):
         s.device = self._device_combo.currentText()
         s.language = self._language.text().strip() or "en"
         s.inference_timeout = self._inference_timeout.value()
+        s.keywords = self._keywords.text().strip()
         s.silence_threshold = self._silence_threshold.value()
         s.silence_margin_ms = self._silence_margin.value()
         s.sample_rate = self._sample_rate.value()

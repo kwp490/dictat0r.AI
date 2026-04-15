@@ -76,6 +76,45 @@ class TestStdioSafetyPatches(unittest.TestCase):
         source = (_DICTATOR_PKG / "__main__.py").read_text(encoding="utf-8")
         self.assertIn("sys.stderr is None", source)
 
+    def test_freeze_support_enabled(self):
+        source = (_DICTATOR_PKG / "__main__.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "multiprocessing.freeze_support()",
+            source,
+            "__main__.py must call multiprocessing.freeze_support() for Windows spawn/frozen workers",
+        )
+
+    def test_granite_worker_adds_dll_directory(self):
+        """Granite child process must add torch/lib to DLL search path for frozen builds."""
+        source = (_DICTATOR_PKG / "engine" / "granite_speech.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "os.add_dll_directory",
+            source,
+            "granite_speech.py worker must call os.add_dll_directory() for torch/lib "
+            "in frozen builds so shm.dll can find its native dependencies",
+        )
+        self.assertIn(
+            "_MEIPASS",
+            source,
+            "granite_speech.py worker must check sys._MEIPASS to detect frozen builds",
+        )
+
+    def test_runtime_hook_exists(self):
+        """A runtime hook must add _MEIPASS to DLL search paths before torch loads."""
+        hook = _DICTATOR_PKG / "_runtime_hook_dll.py"
+        self.assertTrue(hook.exists(), "dictator/_runtime_hook_dll.py is missing")
+        source = hook.read_text(encoding="utf-8")
+        self.assertIn("os.add_dll_directory", source)
+        self.assertIn("_MEIPASS", source)
+        self.assertIn('os.environ["PATH"]', source,
+                       "Runtime hook must also prepend to PATH for legacy LoadLibraryW")
+
+    def test_spec_uses_runtime_hook(self):
+        """dictator.spec must reference the DLL runtime hook."""
+        spec = (_REPO_ROOT / "dictator.spec").read_text(encoding="utf-8")
+        self.assertIn("_runtime_hook_dll", spec,
+                       "dictator.spec runtime_hooks must include _runtime_hook_dll")
+
 
 class TestAllModulesImportable(unittest.TestCase):
     """Every .py file in dictator/ must be importable via absolute paths."""
@@ -235,7 +274,192 @@ class TestTransitiveDependenciesInSpec(unittest.TestCase):
     def test_transformers_data_files_collected(self):
         spec_text = self._read_spec()
         self.assertIn(
-            "collect_data_files('transformers')",
+            "collect_data_files(",
             spec_text,
-            "dictator.spec must call collect_data_files('transformers')",
+            "dictator.spec must call collect_data_files() for transformers data",
         )
+        self.assertIn(
+            "transformers",
+            spec_text,
+            "dictator.spec must reference transformers in data file collection",
+        )
+
+
+class TestSpecStripPatterns(unittest.TestCase):
+    """Verify stripped binaries are not needed and required ones are kept."""
+
+    def _read_spec(self) -> str:
+        return (_REPO_ROOT / "dictator.spec").read_text(encoding="utf-8")
+
+    def _parse_strip_patterns(self) -> list[str]:
+        spec_text = self._read_spec()
+        return re.findall(r"_re\.compile\(r'([^']+)'", spec_text)
+
+    # ── Critical CUDA libs must NOT be stripped ──────────────────────────
+
+    _MUST_KEEP = [
+        "cublas64", "cublasLt64", "cudart64", "cudnn64_9",
+        "cudnn_graph64", "cudnn_ops64", "cudnn_cnn64",
+        "cudnn_heuristic64", "cudnn_engines_precompiled64",
+        "cudnn_engines_runtime_compiled64", "cudnn_adv64",
+        "cufft64", "cufftw64", "cusolver64", "cusolverMg64",
+        "cusparse64", "nvrtc64", "nvrtc-builtins64",
+        "nvJitLink", "cupti64", "nvToolsExt64", "caffe2_nvrtc",
+        "torch_cuda", "torch_cpu", "c10_cuda", "c10.dll", "shm.dll",
+    ]
+
+    def test_critical_cuda_libs_not_stripped(self):
+        """Strip patterns must not match any critical CUDA/cuDNN library."""
+        patterns = [re.compile(p, re.I) for p in self._parse_strip_patterns()]
+        for lib in self._MUST_KEEP:
+            for pat in patterns:
+                self.assertIsNone(
+                    pat.search(lib),
+                    f"Strip r'{pat.pattern}' would remove critical '{lib}'.",
+                )
+
+    # ── Excluded modules must not break engine imports ───────────────────
+
+    def _parse_excludes(self) -> set[str]:
+        spec_text = self._read_spec()
+        m = re.search(r"excludes\s*=\s*\[(.*?)\]", spec_text, re.DOTALL)
+        assert m, "Could not find excludes in dictator.spec"
+        return set(re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)))
+
+    _ENGINE_DEPS = [
+        "transformers", "torch", "torchaudio", "numpy",
+        "huggingface_hub", "sentencepiece", "tokenizers",
+    ]
+
+    def test_engine_deps_not_excluded(self):
+        """Top-level engine dependencies must not appear in excludes."""
+        excludes = self._parse_excludes()
+        for dep in self._ENGINE_DEPS:
+            self.assertNotIn(
+                dep, excludes,
+                f"'{dep}' is excluded but is a direct engine dependency.",
+            )
+
+    _REQUIRED_TORCH = [
+        "torch.nn", "torch.cuda", "torch.autograd",
+        "torch.backends", "torch.utils",
+    ]
+
+    def test_required_torch_submodules_not_excluded(self):
+        """Torch submodules used during inference must not be excluded."""
+        excludes = self._parse_excludes()
+        for mod in self._REQUIRED_TORCH:
+            self.assertNotIn(
+                mod, excludes,
+                f"'{mod}' is required for model inference.",
+            )
+
+    def test_excluded_torch_modules_not_imported_at_startup(self):
+        """Excluded torch submodules must not be loaded when torch starts.
+
+        If torch begins importing an excluded module unconditionally (as
+        happened with torch._strobelight in torch 2.11), PyInstaller
+        will produce a build that crashes immediately with
+        ``ModuleNotFoundError``.  Move such modules from ``excludes``
+        to ``hiddenimports``.
+        """
+        import torch  # noqa: F401 — ensures torch startup imports are loaded
+        excludes = {e for e in self._parse_excludes() if e.startswith("torch.")}
+
+        loaded_and_excluded = []
+        for mod_name in sorted(sys.modules):
+            for excl in excludes:
+                if mod_name == excl or mod_name.startswith(excl + "."):
+                    loaded_and_excluded.append((mod_name, excl))
+                    break
+
+        self.assertEqual(
+            loaded_and_excluded,
+            [],
+            "These modules are in dictator.spec excludes but were imported "
+            "during torch startup — they must be moved to hiddenimports:\n"
+            + "\n".join(f"  {mod} (matched exclude '{excl}')"
+                        for mod, excl in loaded_and_excluded),
+        )
+
+    _REQUIRED_TF = [
+        "transformers.models", "transformers.modeling_utils",
+        "transformers.configuration_utils", "transformers.generation",
+        "transformers.tokenization_utils_base", "transformers.processing_utils",
+        "transformers.integrations",
+    ]
+
+    def test_required_transformers_submodules_not_excluded(self):
+        """Transformers submodules used by engines must not be excluded."""
+        excludes = self._parse_excludes()
+        for mod in self._REQUIRED_TF:
+            self.assertNotIn(
+                mod, excludes,
+                f"'{mod}' is needed for model loading.",
+            )
+
+    def test_no_blanket_cudnn_strip(self):
+        """Strip patterns must not use a blanket pattern matching core cuDNN."""
+        for raw in self._parse_strip_patterns():
+            pat = re.compile(raw, re.I)
+            self.assertIsNone(
+                pat.search("cudnn64_9.dll"),
+                f"r'{raw}' matches core cudnn64_9.dll",
+            )
+            self.assertIsNone(
+                pat.search("cudnn_graph64_9.dll"),
+                f"r'{raw}' matches cudnn_graph64_9.dll",
+            )
+
+
+class TestDistOutputEssentials(unittest.TestCase):
+    """If dist/ exists, verify critical torch/CUDA DLLs are present."""
+
+    _DIST = _REPO_ROOT / "dist" / "dictator" / "_internal"
+
+    @unittest.skipUnless(
+        (_REPO_ROOT / "dist" / "dictator" / "_internal").is_dir(),
+        "No dist/ build present",
+    )
+    def test_critical_cuda_dlls_present(self):
+        """Core CUDA DLLs required for GPU inference must be in the build."""
+        for pat in [
+            "cublas64_*.dll", "cublasLt64_*.dll", "cudart64_*.dll",
+            "cudnn64_*.dll", "cudnn_graph64_*.dll", "cudnn_ops64_*.dll",
+            "cudnn_cnn64_*.dll", "cudnn_heuristic64_*.dll",
+            "cudnn_engines_precompiled64_*.dll",
+        ]:
+            self.assertTrue(
+                list(self._DIST.rglob(pat)),
+                f"Required '{pat}' missing from dist/ — strip too aggressive?",
+            )
+
+    @unittest.skipUnless(
+        (_REPO_ROOT / "dist" / "dictator" / "_internal").is_dir(),
+        "No dist/ build present",
+    )
+    def test_torch_cuda_support_dlls_present(self):
+        """Torch-managed CUDA support DLLs must be preserved in the build."""
+        for pat in [
+            "cufft64_*.dll", "cufftw64_*.dll", "cusolver64_*.dll",
+            "cusolverMg64_*.dll", "cusparse64_*.dll",
+            "cudnn_engines_runtime_compiled64_*.dll", "cudnn_adv64_*.dll",
+            "cupti64_*.dll", "nvJitLink*.dll", "nvToolsExt64_*.dll",
+            "nvrtc64_*.dll", "nvrtc-builtins64_*.dll", "caffe2_nvrtc.dll",
+        ]:
+            self.assertTrue(
+                list(self._DIST.rglob(pat)),
+                f"Required '{pat}' missing from dist/ — torch DLL strip too aggressive?",
+            )
+
+    @unittest.skipUnless(
+        (_REPO_ROOT / "dist" / "dictator" / "_internal").is_dir(),
+        "No dist/ build present",
+    )
+    def test_torch_core_present(self):
+        """Core torch DLLs must be present (including shm.dll for multiprocessing)."""
+        for name in ["torch_cpu.dll", "torch_cuda.dll", "torch.dll", "shm.dll", "c10.dll"]:
+            self.assertTrue(
+                list(self._DIST.rglob(name)),
+                f"Core '{name}' missing from dist/.",
+            )
